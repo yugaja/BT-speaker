@@ -1,0 +1,1657 @@
+#include "../core/options.h"
+#if DSP_MODEL==DSP_ST7789
+#include "TFT_24_ST7789.h"
+
+//#define DEBUG
+#ifdef DEBUG
+    #define DB_PRINT( ... ) { char dbgbuf[120]; sprintf( dbgbuf,   __VA_ARGS__ ) ; Serial.println( dbgbuf ); }
+#else
+    #define DB_PRINT(  ... ) ;
+#endif
+
+#ifndef ARDUINO_STM32_FEATHER
+    #include "pins_arduino.h"
+    #ifndef RASPI
+        #include "wiring_private.h"
+    #endif
+#endif
+#include <limits.h>
+#ifdef __AVR__
+    #include <avr/pgmspace.h>
+#elif defined(ESP8266) || defined(ESP32)
+    #include <pgmspace.h>
+#endif
+
+#ifndef pgm_read_byte
+    #define pgm_read_byte(addr) (*(const unsigned char *)(addr))
+#endif
+#ifndef pgm_read_word
+    #define pgm_read_word(addr) (*(const unsigned short *)(addr))
+#endif
+#ifndef pgm_read_dword
+    #define pgm_read_dword(addr) (*(const unsigned long *)(addr))
+#endif
+
+#if !defined(__INT_MAX__) || (__INT_MAX__ > 0xFFFF)
+    #define pgm_read_pointer(addr) ((void *)pgm_read_dword(addr))
+#else
+    #define pgm_read_pointer(addr) ((void *)pgm_read_word(addr))
+#endif
+
+// Control pins
+
+#ifdef USE_FAST_PINIO
+    #define SPI_DC_HIGH()           *dcport |=  dcpinmask
+    #define SPI_DC_LOW()            *dcport &= ~dcpinmask
+    #define SPI_CS_HIGH()           *csport |=  cspinmask
+    #define SPI_CS_LOW()            *csport &= ~cspinmask
+#else
+    #define SPI_DC_HIGH()           digitalWrite(_rs, HIGH)
+    #define SPI_DC_LOW()            digitalWrite(_rs, LOW)
+    #define SPI_CS_HIGH()           digitalWrite(_cs, HIGH)
+    #define SPI_CS_LOW()            digitalWrite(_cs, LOW)
+#endif
+
+// Software SPI Macros
+
+#ifdef USE_FAST_PINIO
+    #define SSPI_MOSI_HIGH()        *mosiport |=  mosipinmask
+    #define SSPI_MOSI_LOW()         *mosiport &= ~mosipinmask
+    #define SSPI_SCK_HIGH()         *clkport |=  clkpinmask
+    #define SSPI_SCK_LOW()          *clkport &= ~clkpinmask
+#else
+    #define SSPI_MOSI_HIGH()        digitalWrite(_sdi, HIGH)
+    #define SSPI_MOSI_LOW()         digitalWrite(_sdi, LOW)
+    #define SSPI_SCK_HIGH()         digitalWrite(_clk, HIGH)
+    #define SSPI_SCK_LOW()          digitalWrite(_clk, LOW)
+#endif
+
+#define SSPI_BEGIN_TRANSACTION()
+#define SSPI_END_TRANSACTION()
+#define SSPI_WRITE(v)               _spiWrite(v)
+#define SSPI_WRITE16(s)             SSPI_WRITE((s) >> 8); SSPI_WRITE(s)
+#define SSPI_WRITE32(l)             SSPI_WRITE((l) >> 24); SSPI_WRITE((l) >> 16); SSPI_WRITE((l) >> 8); SSPI_WRITE(l)
+#define SSPI_WRITE_PIXELS(c,l)      for(uint32_t i=0; i<(l); i+=2){ SSPI_WRITE(((uint8_t*)(c))[i+1]); SSPI_WRITE(((uint8_t*)(c))[i]); }
+
+// Hardware SPI Macros
+#ifndef ESP32
+    #ifdef SPI_CHANNEL
+        extern SPIClass SPI_CHANNEL; 
+        #define SPI_OBJECT  SPI_CHANNEL
+    #else
+        #define SPI_OBJECT  SPI
+    #endif
+#else
+    #define SPI_OBJECT  _spi
+#endif
+
+#if defined (__AVR__) || defined(TEENSYDUINO) || defined(ARDUINO_ARCH_STM32F1)
+    #define HSPI_SET_CLOCK() SPI_OBJECT.setClockDivider(SPI_CLOCK_DIV2);
+#elif defined (__arm__)
+    #define HSPI_SET_CLOCK() SPI_OBJECT.setClockDivider(11);
+#elif defined(ESP8266) || defined(ESP32)
+    #define HSPI_SET_CLOCK() SPI_OBJECT.setFrequency(SPI_DEFAULT_FREQ);
+#elif defined(RASPI)
+    #define HSPI_SET_CLOCK() SPI_OBJECT.setClock(SPI_DEFAULT_FREQ);
+#elif defined(ARDUINO_ARCH_STM32F1)
+    #define HSPI_SET_CLOCK() SPI_OBJECT.setClock(SPI_DEFAULT_FREQ);
+#else
+    #define HSPI_SET_CLOCK()
+#endif
+
+#ifdef SPI_HAS_TRANSACTION
+    #define HSPI_BEGIN_TRANSACTION() SPI_OBJECT.beginTransaction(SPISettings(SPI_DEFAULT_FREQ, MSBFIRST, SPI_MODE0))
+    #define HSPI_END_TRANSACTION()   SPI_OBJECT.endTransaction()
+#else
+    #define HSPI_BEGIN_TRANSACTION() HSPI_SET_CLOCK(); SPI_OBJECT.setBitOrder(MSBFIRST); SPI_OBJECT.setDataMode(SPI_MODE0)
+    #define HSPI_END_TRANSACTION()
+#endif
+
+#ifdef ESP32
+    #define SPI_HAS_WRITE_PIXELS
+#endif
+#if defined(ESP8266) || defined(ESP32)
+    #define HSPI_READ()              SPI_OBJECT.transfer(0)
+    #define HSPI_WRITE(b)            SPI_OBJECT.write(b)
+    #define HSPI_WRITE16(s)          SPI_OBJECT.write16(s)
+    #define HSPI_WRITE32(l)          SPI_OBJECT.write32(l)
+    #ifdef SPI_HAS_WRITE_PIXELS
+        #define SPI_MAX_PIXELS_AT_ONCE  32
+        #define HSPI_WRITE_PIXELS(c,l)   SPI_OBJECT.writePixels(c,l)
+    #else
+        #define HSPI_WRITE_PIXELS(c,l)   for(uint32_t i=0; i<((l)/2); i++){ HSPI_WRITE16(((uint16_t*)(c))[i]); }
+    #endif
+#elif defined ( __STM32F1__ )
+    #define HSPI_WRITE(b)            SPI_OBJECT.write(b)
+    #define HSPI_WRITE16(s)          SPI_OBJECT.write16(s)
+
+#else
+    #if defined(__AVR_ATmega4809__)
+    static inline uint8_t _avr_spi_read(void) __attribute__((always_inline));
+    static inline uint8_t _avr_spi_read(void) {
+        uint8_t r = 0;
+        SPI0_DATA = r;
+        while(!(SPI0_INTFLAGS & _BV(SPI_IF_bp)));
+        r = SPI0_DATA;
+        return r;
+    }
+        #define HSPI_WRITE(b)        {SPI0_DATA = (b); while(!(SPI0_INTFLAGS & _BV(SPI_IF_bp)));}
+    #elif defined (__AVR__) || defined(TEENSYDUINO)
+        static inline uint8_t _avr_spi_read(void) __attribute__((always_inline));
+        static inline uint8_t _avr_spi_read(void) {
+            uint8_t r = 0;
+            SPDR = r;
+            while(!(SPSR & _BV(SPIF)));
+            r = SPDR;
+            return r;
+        }
+        #define HSPI_WRITE(b)        {SPDR = (b); while(!(SPSR & _BV(SPIF)));}
+    #else
+        #define HSPI_WRITE(b)        SPI_OBJECT.transfer((uint8_t)(b))
+    #endif
+#endif
+
+#if defined (ARDUINO_ARCH_ARC32)
+    #define SPI_DEFAULT_FREQ         16000000
+#elif defined (__AVR__) || defined(TEENSYDUINO)
+    #define SPI_DEFAULT_FREQ         8000000
+#elif defined(ESP8266) || defined(ESP32)
+    #define SPI_DEFAULT_FREQ         24000000
+#elif defined(RASPI)
+    #define SPI_DEFAULT_FREQ         80000000
+#elif defined(ARDUINO_ARCH_STM32F1)
+    #define SPI_DEFAULT_FREQ         18000000
+#else
+    #define SPI_DEFAULT_FREQ         24000000
+#endif
+
+#define SPI_BEGIN()             if(_clk < 0){SPI_OBJECT.begin();}
+#define SPI_BEGIN_TRANSACTION() if(_clk < 0){HSPI_BEGIN_TRANSACTION();}
+#define SPI_END_TRANSACTION()   if(_clk < 0){HSPI_END_TRANSACTION();}
+
+// ST7789 specific commands (commonly used)
+#define ST7789_SWRESET    0x01
+#define ST7789_SLPOUT     0x11
+#define ST7789_COLMOD     0x3A
+#define ST7789_MADCTL     0x36
+#define ST7789_CASET      0x2A
+#define ST7789_RASET      0x2B
+#define ST7789_RAMWR      0x2C
+#define ST7789_DISPON     0x29
+#define ST7789_INVOFF     0x20
+#define ST7789_INVON      0x21
+#define ST7789_NORON      0x13
+
+/* Screen dimensions for your module */
+#define ST7789_LCD_WIDTH  320
+#define ST7789_LCD_HEIGHT 240
+
+// Constructor when using software SPI.  All output pins are configurable.
+TFT_24_ST7789::TFT_24_ST7789(int8_t rst, int8_t rs, int8_t cs, int8_t sdi, int8_t clk, int8_t led) {
+    _rst  = rst;
+    _rs   = rs;
+    _cs   = cs;
+    _sdi  = sdi;
+    _clk  = clk;
+    _led  = led;
+    _brightness = 255; // Set to maximum brightness
+    hwSPI = false;
+    writeFunctionLevel = 0;
+    gfxFont = NULL;
+}
+
+// Constructor when using software SPI.  All output pins are configurable. Adds backlight brightness 0-255
+TFT_24_ST7789::TFT_24_ST7789(int8_t rst, int8_t rs, int8_t cs, int8_t sdi, int8_t clk, int8_t led, uint8_t brightness) {
+    _rst  = rst;
+    _rs   = rs;
+    _cs   = cs;
+    _sdi  = sdi;
+    _clk  = clk;
+    _led  = led;
+    _brightness = brightness;
+    hwSPI = false;
+    writeFunctionLevel = 0;
+    gfxFont = NULL;
+}
+
+// Constructor when using hardware SPI.  Faster, but must use SPI pins
+TFT_24_ST7789::TFT_24_ST7789(int8_t rst, int8_t rs, int8_t cs, int8_t led) {
+    _rst  = rst;
+    _rs   = rs;
+    _cs   = cs;
+    _sdi  = _clk = -1;
+    _led  = led;
+    _brightness = 255; // Set to maximum brightness
+    hwSPI = true;
+    writeFunctionLevel = 0;
+    gfxFont = NULL;
+}
+
+// Constructor when using hardware SPI.  Faster, but must use SPI pins
+TFT_24_ST7789::TFT_24_ST7789(int8_t rst, int8_t rs, int8_t cs, int8_t led, uint8_t brightness) {
+    _rst  = rst;
+    _rs   = rs;
+    _cs   = cs;
+    _sdi  = _clk = -1;
+    _led  = led;
+    _brightness = brightness;
+    hwSPI = true;
+    writeFunctionLevel = 0;
+    gfxFont = NULL;
+}
+
+#ifdef ESP32
+void TFT_24_ST7789::begin(SPIClass &spi)
+#else
+void TFT_24_ST7789::begin()
+#endif
+{
+#ifdef ESP32
+    _spi = spi;
+#endif
+    // Set up reset pin
+    if (_rst > 0) {
+        pinMode(_rst, OUTPUT);
+        digitalWrite(_rst, LOW);
+    }
+    // Set up backlight pin, turn off initially
+    if (_led > 0) {
+        pinMode(_led, OUTPUT);
+        setBacklight(false);
+    }
+
+    // Control pins
+    pinMode(_rs, OUTPUT);
+    digitalWrite(_rs, LOW);
+    pinMode(_cs, OUTPUT);
+    digitalWrite(_cs, HIGH);
+
+#ifdef USE_FAST_PINIO
+    csport    = portOutputRegister(digitalPinToPort(_cs));
+    cspinmask = digitalPinToBitMask(_cs);
+    dcport    = portOutputRegister(digitalPinToPort(_rs));
+    dcpinmask = digitalPinToBitMask(_rs);
+#endif
+
+    // Software SPI
+    if (_clk >= 0) {
+        pinMode(_sdi, OUTPUT);
+        digitalWrite(_sdi, LOW);
+        pinMode(_clk, OUTPUT);
+        digitalWrite(_clk, HIGH);
+#ifdef USE_FAST_PINIO
+        clkport     = portOutputRegister(digitalPinToPort(_clk));
+        clkpinmask  = digitalPinToBitMask(_clk);
+        mosiport    = portOutputRegister(digitalPinToPort(_sdi));
+        mosipinmask = digitalPinToBitMask(_sdi);
+        SSPI_SCK_LOW();
+        SSPI_MOSI_LOW();
+#else
+        clkport     = 0;
+        clkpinmask  = 0;
+        mosiport    = 0;
+        mosipinmask = 0;
+#endif
+    }
+
+    // Hardware SPI
+    SPI_BEGIN();
+
+    // Initialization Code - Reset sequence
+    if (_rst > 0) {
+        digitalWrite(_rst, HIGH); // release reset briefly
+        delay(1);
+        digitalWrite(_rst, LOW); // hold reset
+        delay(10);
+        digitalWrite(_rst, HIGH); // release reset
+        delay(50);
+    }
+
+    // Standard ST7789 initialization sequence (common, conservative)
+    startWrite();
+    _writeCommand8(ST7789_SWRESET); // Software reset
+    endWrite();
+    delay(150);
+
+    startWrite();
+    _writeCommand8(ST7789_SLPOUT);  // Sleep out
+    endWrite();
+    delay(120);
+
+    // Interface Pixel Format: 16bits/pixel (RGB565)
+    startWrite();
+    _writeCommand8(ST7789_COLMOD);
+    _writeData8(0x55); // 16-bit/pixel
+    endWrite();
+    delay(10);
+
+    // Memory data access control (orientation controlled later by setOrientation)
+    startWrite();
+    _writeCommand8(ST7789_MADCTL);
+    _writeData8(0x00); // default, will be updated by setOrientation()
+    endWrite();
+
+    // Normal display on
+    startWrite();
+    _writeCommand8(ST7789_NORON); // Normal display mode on
+    endWrite();
+    delay(10);
+
+    startWrite();
+    _writeCommand8(ST7789_DISPON); // Display on
+    endWrite();
+    delay(120);
+
+    // Turn on backlight
+    setBacklight(true);
+    setOrientation(0);
+
+    // Initialize variables
+    setBackgroundColor( COLOR_BLACK );
+
+    clear();
+}
+
+/**
+ * @brief Low level SPI byte write helper (software or hardware SPI).
+ *
+ * Sends a single byte over SPI. If hardware SPI is selected (_clk < 0),
+ * use the HSPI_WRITE macro (which maps to SPI write on target platform).
+ * Otherwise bit-bang using configured MOSI and SCK pins.
+ *
+ * @param b Byte to send
+ */
+void TFT_24_ST7789::_spiWrite(uint8_t b) {
+    if (_clk < 0) {
+        HSPI_WRITE(b);
+        return;
+    }
+    // Software SPI bitbang
+    for (uint8_t bit = 0x80; bit; bit >>= 1) {
+        if ((b) & bit) {
+            SSPI_MOSI_HIGH();
+        } else {
+            SSPI_MOSI_LOW();
+        }
+        SSPI_SCK_HIGH();
+        SSPI_SCK_LOW();
+    }
+}
+
+/**
+ * @brief Write 16-bit value as two bytes over SPI.
+ *
+ * Prefer HSPI_WRITE16 if available for hardware accelerated transfer.
+ *
+ * @param s 16-bit value
+ */
+void TFT_24_ST7789::_spiWrite16(uint16_t s) {
+#ifdef HSPI_WRITE16
+    if (_clk < 0) {
+        HSPI_WRITE16(s);
+        return;
+    }
+#endif
+    SSPI_WRITE16(s);
+}
+
+/**
+ * @brief Write an 8-bit command (DC low) via SPI.
+ *
+ * This helper toggles the DC pin low, asserts CS, sends the command byte,
+ * then deasserts CS.
+ *
+ * @param c Command byte
+ */
+void TFT_24_ST7789::_spiWriteCommand(uint8_t c) {
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(c);
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Write an 8-bit data byte (DC high) via SPI.
+ *
+ * This helper toggles the DC pin high, asserts CS, sends the data byte,
+ * then deasserts CS.
+ *
+ * @param c Data byte
+ */
+void TFT_24_ST7789::_spiWriteData(uint8_t c) {
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+    _spiWrite(c);
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Orient coordinates according to current orientation.
+ *
+ * Maps logical coordinates into the physical pixel coordinates depending
+ * on rotation (0..3).
+ *
+ * @param x1 Reference to x coordinate (will be modified)
+ * @param y1 Reference to y coordinate (will be modified)
+ */
+void TFT_24_ST7789::_orientCoordinates(uint16_t &x1, uint16_t &y1) {
+
+    switch (_orientation) {
+        case 0:  // default
+            break;
+        case 1:
+            y1 = _maxY - y1 - 1;
+            _swap(x1, y1);
+            break;
+        case 2:
+            x1 = _maxX - x1 - 1;
+            y1 = _maxY - y1 - 1;
+            break;
+        case 3:
+            x1 = _maxX - x1 - 1;
+            _swap(x1, y1);
+            break;
+    }
+}
+
+/**
+ * @brief Set the drawing window (rectangle).
+ *
+ * Uses CASET/RASET and RAMWR to configure the GRAM write area. This overload
+ * uses the default auto-increment mode consistent with the ILI9225 template.
+ *
+ * @param x0 left
+ * @param y0 top
+ * @param x1 right
+ * @param y1 bottom
+ */
+void TFT_24_ST7789::_setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    _setWindow( x0, y0, x1, y1, TopDown_L2R ); // default for drawing characters
+}
+
+/**
+ * @brief Set the drawing window with optional autoinc mode (kept for API parity).
+ *
+ * ST7789 uses CASET/RASET to set column and row ranges. Coordinates are clipped
+ * to screen size and oriented according to current rotation.
+ *
+ * @param x0 left
+ * @param y0 top
+ * @param x1 right
+ * @param y1 bottom
+ * @param mode autoincrement mode (unused for ST7789 but kept for parity)
+ */
+void TFT_24_ST7789::_setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, autoIncMode_t mode) {
+    DB_PRINT( "setWindow( x0=%d, y0=%d, x1=%d, y1=%d, mode=%d )", x0, y0, x1, y1, mode );
+
+    // clip to TFT-Dimensions
+    x0 = min( x0, (uint16_t) (_maxX-1) );
+    x1 = min( x1, (uint16_t) (_maxX-1) );
+    y0 = min( y0, (uint16_t) (_maxY-1) );
+    y1 = min( y1, (uint16_t) (_maxY-1) );
+    _orientCoordinates(x0, y0);
+    _orientCoordinates(x1, y1);
+
+    if (x1<x0) _swap(x0, x1);
+    if (y1<y0) _swap(y0, y1);
+
+    startWrite();
+    // Column address set (CASET) - send start/end column
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(ST7789_CASET);
+    SPI_DC_HIGH();
+    // send column addresses (2 bytes each: hi, lo)
+    _spiWrite(x0 >> 8);
+    _spiWrite(x0 & 0xFF);
+    _spiWrite(x1 >> 8);
+    _spiWrite(x1 & 0xFF);
+    SPI_CS_HIGH();
+
+    // Row address set (RASET) - send start/end row
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(ST7789_RASET);
+    SPI_DC_HIGH();
+    _spiWrite(y0 >> 8);
+    _spiWrite(y0 & 0xFF);
+    _spiWrite(y1 >> 8);
+    _spiWrite(y1 & 0xFF);
+    SPI_CS_HIGH();
+
+    // Prepare to write to RAM
+    _writeCommand8(ST7789_RAMWR);
+
+    endWrite();
+}
+
+/**
+ * @brief Reset the window to full screen.
+ *
+ * Restore CASET/RASET to full dimensions.
+ */
+void TFT_24_ST7789::_resetWindow() {
+    _setWindow(0, 0, _maxX - 1, _maxY - 1);
+}
+
+/**
+ * @brief Clear the screen with given color (default black).
+ *
+ * Saves current orientation, uses fillRectangle for the full area, and restores
+ * orientation afterwards.
+ *
+ * @param withColor 16-bit color to fill
+ */
+void TFT_24_ST7789::clear(uint16_t withColor) {
+    uint8_t old = _orientation;
+    setOrientation(0);
+    fillRectangle(0, 0, _maxX - 1, _maxY - 1, withColor);
+    setOrientation(old);
+    delay(10);
+}
+
+/**
+ * @brief Invert the display.
+ *
+ * @param flag true to invert, false for normal
+ */
+void TFT_24_ST7789::invertDisplay(boolean flag) {
+    startWrite();
+    _writeCommand8(flag ? ST7789_INVON : ST7789_INVOFF);
+    endWrite();
+}
+
+/**
+ * @brief Set backlight on/off.
+ *
+ * Uses PWM via analogWrite (Arduino) when available; for ESP32 analogWrite
+ * may require ledc setup in user code — left as simple analogWrite for parity.
+ *
+ * @param flag true = on, false = off
+ */
+void TFT_24_ST7789::setBacklight(boolean flag) {
+    blState = flag;
+#ifndef ESP32
+    if (_led) analogWrite(_led, blState ? _brightness : 0);
+#else
+    // On ESP32 user may map analogWrite to ledc — keep simple for template
+    if (_led >= 0) analogWrite(_led, blState ? _brightness : 0);
+#endif
+}
+
+/**
+ * @brief Set backlight brightness.
+ *
+ * Stores brightness and reapplies last backlight state.
+ *
+ * @param brightness 0..255
+ */
+void TFT_24_ST7789::setBacklightBrightness(uint8_t brightness) {
+    _brightness = brightness;
+    setBacklight(blState);
+}
+
+/**
+ * @brief Switch display (panel) on/off.
+ *
+ * Uses DISPON / DISPOFF-like sequence. For ST7789 we toggle DISPON and SLPOUT.
+ *
+ * @param flag true = on, false = off
+ */
+void TFT_24_ST7789::setDisplay(boolean flag) {
+    if (flag) {
+        startWrite();
+        _writeCommand8(ST7789_SLPOUT);
+        endWrite();
+        delay(120);
+        startWrite();
+        _writeCommand8(ST7789_DISPON);
+        endWrite();
+        delay(120);
+    } else {
+        startWrite();
+        _writeCommand8(ST7789_INVOFF);
+        endWrite();
+        delay(50);
+        // ST7789 doesn't have a dedicated "display off" command besides sleep
+        startWrite();
+        _writeCommand8(0x10); // entering sleep (SLEEP_IN) - caution: 0x10 is SLEEP IN for many drivers
+        endWrite();
+        delay(120);
+    }
+}
+
+/**
+ * @brief Set orientation (rotation).
+ *
+ * Updates MADCTL register according to requested orientation and sets
+ * _maxX/_maxY accordingly.
+ *
+ * @param orientation 0..3
+ */
+void TFT_24_ST7789::setOrientation(uint8_t orientation) {
+
+    _orientation = orientation % 4;
+
+    switch (_orientation) {
+    case 0:
+        _maxX = ST7789_LCD_WIDTH;
+        _maxY = ST7789_LCD_HEIGHT;
+        break;
+    case 1:
+        _maxX = ST7789_LCD_HEIGHT;
+        _maxY = ST7789_LCD_WIDTH;
+        break;
+    case 2:
+        _maxX = ST7789_LCD_WIDTH;
+        _maxY = ST7789_LCD_HEIGHT;
+        break;
+    case 3:
+        _maxX = ST7789_LCD_HEIGHT;
+        _maxY = ST7789_LCD_WIDTH;
+        break;
+    }
+
+    // Configure MADCTL (Memory Data Access Control) for rotation
+    uint8_t madctl = 0x00;
+
+    switch (_orientation) {
+        case 0: madctl = 0x00; break; // MX=0, MY=0, MV=0 (default)
+        case 1: madctl = 0x60; break; // MV=1, MX=0, MY=1  (rotate right)
+        case 2: madctl = 0xC0; break; // MX=1, MY=1 (180)
+        case 3: madctl = 0xA0; break; // MV=1, MX=1, MY=0 (rotate left)
+    }
+
+    // Set RGB or BGR ordering if needed (0x08 toggles BGR) - keep RGB default
+    startWrite();
+    _writeCommand8(ST7789_MADCTL);
+    _writeData8(madctl);
+    endWrite();
+}
+
+/**
+ * @brief Get current orientation value.
+ *
+ * @return orientation 0..3
+ */
+uint8_t TFT_24_ST7789::getOrientation() {
+    return _orientation;
+}
+
+/**
+ * @brief Draw rectangle outline.
+ *
+ * Uses drawLine for four edges.
+ */
+void TFT_24_ST7789::drawRectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color) {
+    startWrite();
+    drawLine(x1, y1, x1, y2, color);
+    drawLine(x1, y1, x2, y1, color);
+    drawLine(x1, y2, x2, y2, color);
+    drawLine(x2, y1, x2, y2, color);
+    endWrite();
+}
+
+/**
+ * @brief Fill rectangle with color.
+ *
+ * Uses _setWindow and streams pixel data to RAM.
+ */
+void TFT_24_ST7789::fillRectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color) {
+
+    _setWindow(x1, y1, x2, y2);
+
+    startWrite();
+    // write color for width*height pixels
+    uint32_t pixels = (uint32_t)(y2 - y1 + 1) * (uint32_t)(x2 - x1 + 1);
+    // send as 16-bit values
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+#ifdef HSPI_WRITE_PIXELS
+    if (_clk < 0) {
+        // If platform supports blocking pixel write, it is faster
+        // but we don't have an array here; fallback to loop
+    }
+#endif
+    for (uint32_t i = 0; i < pixels; ++i) {
+        _spiWrite16(color);
+    }
+    SPI_CS_HIGH();
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief Draw circle outline using Bresenham's algorithm.
+ */
+void TFT_24_ST7789::drawCircle(uint16_t x0, uint16_t y0, uint16_t r, uint16_t color) {
+
+    int16_t f = 1 - r;
+    int16_t ddF_x = 1;
+    int16_t ddF_y = -2 * r;
+    int16_t x = 0;
+    int16_t y = r;
+
+    startWrite();
+
+    drawPixel(x0, y0 + r, color);
+    drawPixel(x0, y0 - r, color);
+    drawPixel(x0 + r, y0, color);
+    drawPixel(x0 - r, y0, color);
+
+    while (x < y) {
+        if (f >= 0) {
+            y--;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        x++;
+        ddF_x += 2;
+        f += ddF_x;
+
+        drawPixel(x0 + x, y0 + y, color);
+        drawPixel(x0 - x, y0 + y, color);
+        drawPixel(x0 + x, y0 - y, color);
+        drawPixel(x0 - x, y0 - y, color);
+        drawPixel(x0 + y, y0 + x, color);
+        drawPixel(x0 - y, y0 + x, color);
+        drawPixel(x0 + y, y0 - x, color);
+        drawPixel(x0 - y, y0 - x, color);
+    }
+    endWrite();
+}
+
+/**
+ * @brief Fill circle (solid).
+ */
+void TFT_24_ST7789::fillCircle(uint8_t x0, uint8_t y0, uint8_t radius, uint16_t color) {
+
+    int16_t f = 1 - radius;
+    int16_t ddF_x = 1;
+    int16_t ddF_y = -2 * radius;
+    int16_t x = 0;
+    int16_t y = radius;
+
+    startWrite();
+    while (x < y) {
+        if (f >= 0) {
+            y--;
+            ddF_y += 2;
+            f += ddF_y;
+        }
+        x++;
+        ddF_x += 2;
+        f += ddF_x;
+
+        drawLine(x0 + x, y0 + y, x0 - x, y0 + y, color); // bottom
+        drawLine(x0 + x, y0 - y, x0 - x, y0 - y, color); // top
+        drawLine(x0 + y, y0 - x, x0 + y, y0 + x, color); // right
+        drawLine(x0 - y, y0 - x, x0 - y, y0 + x, color); // left
+    }
+    endWrite();
+    fillRectangle(x0-x, y0-y, x0+x, y0+y, color);
+}
+
+/**
+ * @brief Draw line using Bresenham algorithm.
+ */
+void TFT_24_ST7789::drawLine(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color) {
+
+    // Classic Bresenham algorithm
+    int16_t steep = abs((int16_t)(y2 - y1)) > abs((int16_t)(x2 - x1));
+
+    int16_t dx, dy;
+
+    if (steep) {
+        _swap(x1, y1);
+        _swap(x2, y2);
+    }
+
+    if (x1 > x2) {
+        _swap(x1, x2);
+        _swap(y1, y2);
+    }
+
+    dx = x2 - x1;
+    dy = abs((int16_t)(y2 - y1));
+
+    int16_t err = dx / 2;
+    int16_t ystep;
+
+    if (y1 < y2) ystep = 1;
+    else ystep = -1;
+
+    startWrite();
+    for (; x1<=x2; x1++) {
+        if (steep) drawPixel(y1, x1, color);
+        else       drawPixel(x1, y1, color);
+
+        err -= dy;
+        if (err < 0) {
+            y1 += ystep;
+            err += dx;
+        }
+    }
+    endWrite();
+}
+
+/**
+ * @brief Draw single pixel at (x1,y1) with color.
+ *
+ * Uses direct RAM write (set column/row and write RAM).
+ */
+void TFT_24_ST7789::drawPixel(uint16_t x1, uint16_t y1, uint16_t color) {
+
+    if((x1 >= _maxX) || (y1 >= _maxY)) return;
+
+    _orientCoordinates(x1, y1);
+    startWrite();
+    // set column and row then write pixel
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(ST7789_CASET);
+    SPI_DC_HIGH();
+    _spiWrite(x1 >> 8); _spiWrite(x1 & 0xFF);
+    _spiWrite(x1 >> 8); _spiWrite(x1 & 0xFF);
+    SPI_CS_HIGH();
+
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(ST7789_RASET);
+    SPI_DC_HIGH();
+    _spiWrite(y1 >> 8); _spiWrite(y1 & 0xFF);
+    _spiWrite(y1 >> 8); _spiWrite(y1 & 0xFF);
+    SPI_CS_HIGH();
+
+    // write pixel
+    _writeCommand8(ST7789_RAMWR);
+    _writeData16(color);
+
+    endWrite();
+}
+
+/**
+ * @brief Return maximum X (width).
+ */
+uint16_t TFT_24_ST7789::maxX() {
+    return _maxX;
+}
+
+/**
+ * @brief Return maximum Y (height).
+ */
+uint16_t TFT_24_ST7789::maxY() {
+    return _maxY;
+}
+
+/**
+ * @brief Combine 8-bit RGB components into 16-bit RGB565.
+ *
+ * @param red8  Red 0..255
+ * @param green8 Green 0..255
+ * @param blue8 Blue 0..255
+ * @return 16-bit RGB565
+ */
+uint16_t TFT_24_ST7789::setColor(uint8_t red8, uint8_t green8, uint8_t blue8) {
+    return (red8 >> 3) << 11 | (green8 >> 2) << 5 | (blue8 >> 3);
+}
+
+/**
+ * @brief Split 16-bit RGB565 into 8-bit components.
+ */
+void TFT_24_ST7789::splitColor(uint16_t rgb, uint8_t &red, uint8_t &green, uint8_t &blue) {
+    red   = (rgb & 0b1111100000000000) >> 11 << 3;
+    green = (rgb & 0b0000011111100000) >>  5 << 2;
+    blue  = (rgb & 0b0000000000011111)       << 3;
+}
+
+/**
+ * @brief Simple swap helper for two 16-bit values.
+ */
+void TFT_24_ST7789::_swap(uint16_t &a, uint16_t &b) {
+    uint16_t w = a;
+    a = b;
+    b = w;
+}
+
+/**
+ * @brief Write an 8-bit command (helper, toggles DC/CS).
+ *
+ * Kept for compatibility with _writeCommand16 used in ILI9225 template.
+ *
+ * @param c 8-bit command
+ */
+void TFT_24_ST7789::_writeCommand8(uint8_t c) {
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+    _spiWrite(c);
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Write an 8-bit data byte (helper).
+ *
+ * @param d data byte
+ */
+void TFT_24_ST7789::_writeData8(uint8_t d) {
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+    _spiWrite(d);
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Write a 16-bit data word (big endian) to the display.
+ *
+ * This sends two bytes of data while DC=HIGH (RAM data).
+ *
+ * @param data 16-bit data
+ */
+void TFT_24_ST7789::_writeData16(uint16_t data) {
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+#ifdef HSPI_WRITE16
+    if (_clk < 0) {
+        HSPI_WRITE16(data);
+        SPI_CS_HIGH();
+        return;
+    }
+#endif
+    _spiWrite(data >> 8);
+    _spiWrite(data & 0xFF);
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Write 16-bit command (kept for API parity with ILI9225).
+ *
+ * For ST7789 commands are 8-bit; this function sends the 16-bit value
+ * as two successive command bytes (hi then lo).
+ *
+ * @param command 16-bit value
+ */
+void TFT_24_ST7789::_writeCommand16(uint16_t command) {
+    SPI_DC_LOW();
+    SPI_CS_LOW();
+#ifdef HSPI_WRITE16
+    if (_clk < 0) {
+        HSPI_WRITE16(command);
+    } else
+#endif
+    {
+        _spiWrite(command >> 8);
+        _spiWrite(command & 0xFF);
+    }
+    SPI_CS_HIGH();
+}
+
+/**
+ * @brief Low-level register write: send command then 16-bit data.
+ *
+ * This keeps the same signature as ILI9225 `_writeRegister(reg,data)`.
+ * For ST7789 we send an 8-bit command then two data bytes (hi,lo).
+ *
+ * @param reg Command/register (low 8-bit used)
+ * @param data 16-bit data payload
+ */
+void TFT_24_ST7789::_writeRegister(uint16_t reg, uint16_t data) {
+    _writeCommand8((uint8_t)reg);
+    _writeData16(data);
+}
+
+/**
+ * @brief Draw triangle outline using drawLine.
+ */
+void TFT_24_ST7789::drawTriangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t x3, uint16_t y3, uint16_t color) {
+    startWrite();
+    drawLine(x1, y1, x2, y2, color);
+    drawLine(x2, y2, x3, y3, color);
+    drawLine(x3, y3, x1, y1, color);
+    endWrite();
+}
+
+/**
+ * @brief Fill triangle (scanline algorithm).
+ */
+void TFT_24_ST7789::fillTriangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t x3, uint16_t y3, uint16_t color) {
+
+    uint16_t a, b, y, last;
+
+    // Sort coordinates by Y order (y3 >= y2 >= y1)
+    if (y1 > y2) {
+        _swap(y1, y2); _swap(x1, x2);
+    }
+    if (y2 > y3) {
+        _swap(y3, y2); _swap(x3, x2);
+    }
+    if (y1 > y2) {
+        _swap(y1, y2); _swap(x1, x2);
+    }
+
+    startWrite();
+    if (y1 == y3) { // Handle awkward all-on-same-line case as its own thing
+        a = b = x1;
+        if (x2 < a)      a = x2;
+        else if (x2 > b) b = x2;
+        if (x3 < a)      a = x3;
+        else if (x3 > b) b = x3;
+            drawLine(a, y1, b, y1, color);
+        return;
+    }
+
+    int16_t dx11 = x2 - x1,
+            dy11 = y2 - y1,
+            dx12 = x3 - x1,
+            dy12 = y3 - y1,
+            dx22 = x3 - x2,
+            dy22 = y3 - y2;
+    int32_t sa   = 0,
+            sb   = 0;
+
+    if (y2 == y3) last = y2;
+    else          last = y2 - 1;
+
+    for (y = y1; y <= last; y++) {
+        a   = x1 + sa / dy11;
+        b   = x1 + sb / dy12;
+        sa += dx11;
+        sb += dx12;
+        if (a > b) _swap(a,b);
+        drawLine(a, y, b, y, color);
+    }
+
+    sa = dx22 * (y - y2);
+    sb = dx12 * (y - y1);
+    for (; y<=y3; y++) {
+        a   = x2 + sa / dy22;
+        b   = x1 + sb / dy12;
+        sa += dx22;
+        sb += dx12;
+        if (a > b) _swap(a,b);
+            drawLine(a, y, b, y, color);
+    }
+    endWrite();
+}
+
+/**
+ * @brief Set background color used when drawing bitmaps/text.
+ */
+void TFT_24_ST7789::setBackgroundColor(uint16_t color) {
+    _bgColor = color;
+}
+
+/**
+ * @brief Set a custom bitmap font (simple font structure).
+ */
+void TFT_24_ST7789::setFont(uint8_t* font, bool monoSp) {
+
+    cfont.font     = font;
+    cfont.width    = readFontByte(0);
+    cfont.height   = readFontByte(1);
+    cfont.offset   = readFontByte(2);
+    cfont.numchars = readFontByte(3);
+    cfont.nbrows   = cfont.height / 8;
+    cfont.monoSp   = monoSp;
+
+    if (cfont.height % 8) cfont.nbrows++;  // Set number of bytes used by height of font in multiples of 8
+}
+
+_currentFont TFT_24_ST7789::getFont() {
+    return cfont;
+}
+
+/**
+ * @brief Draw an ASCII string with the simple font.
+ */
+uint16_t TFT_24_ST7789::drawText(uint16_t x, uint16_t y, STRING s, uint16_t color) {
+
+    uint16_t currx = x;
+
+#ifdef USE_STRING_CLASS
+    for (uint8_t k = 0; k < s.length(); k++) {
+        currx += drawChar(currx, y, s.charAt(k), color) + 1;
+    }
+#else
+    for (uint8_t k = 0; k < strlen(s); k++) {
+        currx += drawChar(currx, y, s[k], color) + 1;
+    }
+#endif
+    return currx;
+}
+
+/**
+ * @brief Compute text width for string with current simple font.
+ */
+uint16_t TFT_24_ST7789::getTextWidth( STRING s ) {
+
+    uint16_t width = 0;
+#ifdef USE_STRING_CLASS
+    for (uint8_t k = 0; k < s.length(); k++) {
+        width += getCharWidth(s.charAt(k) ) + 1;
+    }
+#else
+    for (uint8_t k = 0; k < strlen(s); k++) {
+        width += getCharWidth(s[k]) + 1;
+    }
+#endif
+    return width;
+}
+
+/**
+ * @brief Draw single character with simple font (non-GFX).
+ *
+ * This is a direct port of the ILI9225 approach: reads font bytes
+ * from PROGMEM and writes pixels or uses fastMode when possible.
+ */
+uint16_t TFT_24_ST7789::drawChar(uint16_t x, uint16_t y, uint16_t ch, uint16_t color) {
+
+    uint8_t charData, charWidth;
+    uint8_t h, i, j;
+    uint16_t charOffset;
+    bool fastMode;
+
+    charOffset = (cfont.width * cfont.nbrows) + 1;  // bytes used by each character
+    charOffset = (charOffset * (ch - cfont.offset)) + FONT_HEADER_SIZE;  // char offset (add header size)
+    if ( cfont.monoSp ) charWidth = cfont.width;      // monospaced: get char width from font
+    else                charWidth  = readFontByte(charOffset);  // get chracter width from 1st byte
+    charOffset++;  // increment pointer to first character data byte
+
+    startWrite();
+    
+    // use autoincrement/decrement feature, if character fits completely on screen
+    fastMode = ( (x+charWidth+1) < _maxX && (y+cfont.height-1) < _maxY );
+    
+    if ( fastMode ) _setWindow( x,y,x+charWidth+1, y+cfont.height-1 );  // set character Window
+
+    for (i = 0; i <= charWidth; i++) {  // each font "column" (+1 blank column for spacing)
+        h = 0;  // keep track of char height
+        for (j = 0; j < cfont.nbrows; j++)     {  // each column byte
+            if (i == charWidth) charData = (uint8_t)0x0; // Insert blank column
+            else                charData = readFontByte(charOffset);
+            charOffset++;
+            
+            // Process every row in font character
+            for (uint8_t k = 0; k < 8; k++) {
+                if (h >= cfont.height ) break;  // No need to process excess bits
+                if (fastMode ) _writeData16( bitRead(charData, k)?color:_bgColor );
+                else drawPixel( x + i, y + (j * 8) + k, bitRead(charData, k)?color:_bgColor );
+                h++;
+            }
+        }
+    }
+    endWrite();
+    _resetWindow();
+    return charWidth;
+}
+
+/**
+ * @brief Get width of a single character in simple font.
+ */
+uint16_t TFT_24_ST7789::getCharWidth(uint16_t ch) {
+    uint16_t charOffset;
+    charOffset = (cfont.width * cfont.nbrows) + 1;  // bytes used by each character
+    charOffset = (charOffset * (ch - cfont.offset)) + FONT_HEADER_SIZE;  // char offset
+
+    return readFontByte(charOffset);  // get font width from 1st byte
+}
+
+/**
+ * @brief Draw 1-bit bitmap (PROGMEM-resident) with transparent background.
+ */
+void TFT_24_ST7789::drawBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  0, true, true, false );
+}
+
+/**
+ * @brief Draw 1-bit bitmap (PROGMEM-resident) with background.
+ */
+void TFT_24_ST7789::drawBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color, uint16_t bg) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  bg, false, true, false );
+}
+
+/**
+ * @brief RAM-resident bitmap, transparent.
+ */
+void TFT_24_ST7789::drawBitmap(int16_t x, int16_t y, uint8_t *bitmap, int16_t w, int16_t h, uint16_t color) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  0, true, false, false );
+}
+
+/**
+ * @brief RAM-resident bitmap with background.
+ */
+void TFT_24_ST7789::drawBitmap(int16_t x, int16_t y, uint8_t *bitmap, int16_t w, int16_t h, uint16_t color, uint16_t bg) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  bg, false, false, false );
+}
+
+/**
+ * @brief Draw XBM bitmap (GIMP exported).
+ */
+void TFT_24_ST7789::drawXBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  0, true, true, true );
+}
+
+void TFT_24_ST7789::drawXBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color, uint16_t bg) {
+    _drawBitmap( x,  y, bitmap,  w,  h, color,  bg, false, true, true );
+}
+
+/**
+ * @brief Internal bitmap drawing worker for 1-bit bitmaps.
+ *
+ * Handles PROGMEM vs RAM-resident bitmaps, optional transparency, and XBM bit-order.
+ */
+void TFT_24_ST7789::_drawBitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color, uint16_t bg, bool transparent, bool progmem,bool Xbit) {
+    bool noAutoInc = false;     // Flag set when transparent pixel was 'written'
+    int16_t i, j, byteWidth = (w + 7) / 8;
+    int16_t wx0, wy0, wx1, wy1, wh;  // Window-position and size
+    uint8_t byte, maskBit;
+    byte = 0;
+    maskBit = Xbit? 0x01:0x80;
+    DB_PRINT( "DrawBitmap.. maxX=%d, maxY=%d", _maxX,_maxY );
+    wx0 = x < 0 ? 0 : x;
+    wy0 = y < 0 ? 0 : y;
+    wx1 = (x + w > _maxX ?_maxX : x + w ) - 1;
+    wy1 = (y + h > _maxY ?_maxY : y + h ) - 1;
+    wh  = wy1 - wy0 + 1;
+    _setWindow(wx0, wy0, wx1, wy1, L2R_TopDown);
+    startWrite();
+    for (j = y>=0?0:-y; j < (y>=0?0:-y)+wh; j++) {
+        for (i = 0; i < w; i++ ) {
+            if (i & 7) {
+                if ( Xbit ) byte >>=1; else byte <<= 1;
+            }
+            else {
+                if ( progmem ) byte   = pgm_read_byte(bitmap + j * byteWidth + i / 8);
+                else           byte   = bitmap[j * byteWidth + i / 8];
+            }
+            if ( x+i >= wx0 && x+i <= wx1 ) {
+                if (byte & maskBit) {
+                    if (noAutoInc) {
+                        drawPixel(x + i, y + j, color);
+                        noAutoInc = false;
+                    }
+                    else  {
+                        _writeData16(color);
+                    }
+                }
+                else  {
+                    if (transparent) noAutoInc = true;
+                    else _writeData16( bg);
+                }
+            }
+        }
+    }
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief High speed color bitmap (2D pointer).
+ */
+void TFT_24_ST7789::drawBitmap(uint16_t x1, uint16_t y1, const uint16_t** bitmap, int16_t w, int16_t h) {
+    startWrite();
+    _setWindow(x1, y1, x1+w-1, y1+h-1, L2R_TopDown);
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+    for (uint16_t y = 0; y < h; y++) {
+#ifdef HSPI_WRITE_PIXELS
+        if (_clk < 0) {
+            HSPI_WRITE_PIXELS(bitmap[y], w * sizeof(uint16_t));
+            continue;
+        }
+#endif
+        for (uint16_t x = 0; x < w; x++) {
+            _spiWrite16(bitmap[y][x]);
+        }
+    }
+    SPI_CS_HIGH();
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief High speed color bitmap (2D pointer, RAM).
+ */
+void TFT_24_ST7789::drawBitmap(uint16_t x1, uint16_t y1, uint16_t** bitmap, int16_t w, int16_t h) {
+    startWrite();
+    _setWindow(x1, y1, x1+w-1, y1+h-1, L2R_TopDown);
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+    for (uint16_t y = 0; y < h; y++) {
+#ifdef HSPI_WRITE_PIXELS
+        if (_clk < 0) {
+            HSPI_WRITE_PIXELS(bitmap[y], w * sizeof(uint16_t));
+            continue;
+        }
+#endif
+        for (uint16_t x = 0; x < w; x++) {
+            _spiWrite16(bitmap[y][x]);
+        }
+    }
+    SPI_CS_HIGH();
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief 1-D array high speed color bitmap (const).
+ */
+void TFT_24_ST7789::drawBitmap(uint16_t x1, uint16_t y1, const uint16_t* bitmap, int16_t w, int16_t h) {
+    startWrite();
+    _setWindow(x1, y1, x1+w-1, y1+h-1, L2R_TopDown);
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+#ifdef HSPI_WRITE_PIXELS
+    if (_clk < 0) {
+        HSPI_WRITE_PIXELS(bitmap, w * h * sizeof(uint16_t));
+    } else
+#endif
+    for (uint16_t i = 0; i < h * w; ++i) {
+        _spiWrite16(bitmap[i]);
+    }
+    SPI_CS_HIGH();
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief 1-D array high speed color bitmap (RAM).
+ */
+void TFT_24_ST7789::drawBitmap(uint16_t x1, uint16_t y1, uint16_t* bitmap, int16_t w, int16_t h) {
+    startWrite();
+    _setWindow(x1, y1, x1+w-1, y1+h-1, L2R_TopDown);
+    SPI_DC_HIGH();
+    SPI_CS_LOW();
+#ifdef HSPI_WRITE_PIXELS
+    if (_clk < 0) {
+        HSPI_WRITE_PIXELS(bitmap, w * h * sizeof(uint16_t));
+    } else
+#endif
+    for (uint16_t i = 0; i < h * w; ++i) {
+        _spiWrite16(bitmap[i]);
+    }
+    SPI_CS_HIGH();
+    endWrite();
+    _resetWindow();
+}
+
+/**
+ * @brief Begin a multi-write session.
+ *
+ * Increments writeFunctionLevel and asserts CS on first call.
+ */
+void TFT_24_ST7789::startWrite(void) {
+    if (writeFunctionLevel++ == 0) {
+        SPI_BEGIN_TRANSACTION();
+        SPI_CS_LOW();
+    }
+}
+
+/**
+ * @brief End a multi-write session.
+ *
+ * Decrements writeFunctionLevel and deasserts CS when count reaches zero.
+ */
+void TFT_24_ST7789::endWrite(void) {
+    if (--writeFunctionLevel == 0) {
+        SPI_CS_HIGH();
+        SPI_END_TRANSACTION();
+    }
+}
+
+/**
+ * @brief Set GFX (Adafruit GFX) font pointer.
+ */
+void TFT_24_ST7789::setGFXFont(const GFXfont *f) {
+    gfxFont = (GFXfont *)f;
+}
+
+/**
+ * @brief Draw a string using current GFX font.
+ */
+void TFT_24_ST7789::drawGFXText(int16_t x, int16_t y, STRING s, uint16_t color) {
+
+    int16_t currx = x;
+
+    if(gfxFont) {
+#ifdef USE_STRING_CLASS
+        for (uint8_t k = 0; k < s.length(); k++) {
+            currx += drawGFXChar(currx, y, s.charAt(k), color) + 1;
+        }
+#else
+        for (uint8_t k = 0; k < strlen(s); k++) {
+            currx += drawGFXChar(currx, y, s[k], color) + 1;
+        }
+#endif
+    }
+}
+
+/**
+ * @brief Draw a single character from GFX font.
+ */
+uint16_t TFT_24_ST7789::drawGFXChar(int16_t x, int16_t y, unsigned char c, uint16_t color) {
+
+    c -= (uint8_t)pgm_read_byte(&gfxFont->first);
+    GFXglyph *glyph  = &(((GFXglyph *)pgm_read_pointer(&gfxFont->glyph))[c]);
+    uint8_t  *bitmap = (uint8_t *)pgm_read_pointer(&gfxFont->bitmap);
+
+    uint16_t bo = pgm_read_word(&glyph->bitmapOffset);
+    uint8_t  w  = pgm_read_byte(&glyph->width),
+             h  = pgm_read_byte(&glyph->height),
+             xa = pgm_read_byte(&glyph->xAdvance);
+    int8_t   xo = pgm_read_byte(&glyph->xOffset),
+             yo = pgm_read_byte(&glyph->yOffset);
+    uint8_t  xx, yy, bits = 0, bit = 0;
+
+    startWrite();
+    _setWindow( x-1,y+2,x+w+xo+1, y+yo-2 );  // set character Window
+    for(yy=0; yy<h; yy++) {
+        for(xx=0; xx<w; xx++) {
+            if(!(bit++ & 7)) {
+                bits = pgm_read_byte(&bitmap[bo++]);
+            }
+            if(bits & 0x80) {
+                drawPixel(x+xo+xx, y+yo+yy, color);
+            }
+            bits <<= 1;
+        }
+    }
+    endWrite();
+    _resetWindow();
+    return (uint16_t)xa;
+}
+
+/**
+ * @brief Retrieve glyph extents from GFX font.
+ */
+void TFT_24_ST7789::getGFXCharExtent(uint8_t c, int16_t *gw, int16_t *gh, int16_t *xa) {
+    uint8_t first = pgm_read_byte(&gfxFont->first),
+            last  = pgm_read_byte(&gfxFont->last);
+    if((c >= first) && (c <= last)) {
+        GFXglyph *glyph = &(((GFXglyph *)pgm_read_pointer(&gfxFont->glyph))[c - first]);
+        *gw = pgm_read_byte(&glyph->width);
+        *gh = pgm_read_byte(&glyph->height);
+        *xa = pgm_read_byte(&glyph->xAdvance);
+    }
+}
+
+/**
+ * @brief Compute bounds (width/height) of a GFX string.
+ */
+void TFT_24_ST7789::getGFXTextExtent(STRING str, int16_t x, int16_t y, int16_t *w, int16_t *h) {
+    *w  = *h = 0;
+#ifdef USE_STRING_CLASS
+    for (uint8_t k = 0; k < str.length(); k++) {
+        uint8_t c = str.charAt(k);
+#else
+    for (uint8_t k = 0; k < strlen(str); k++) {
+        uint8_t c = str[k];
+#endif
+        int16_t gw, gh, xa;
+        getGFXCharExtent(c, &gw, &gh, &xa);
+        if(gh > *h) {
+            *h = gh;
+        }
+        *w += xa;
+    }
+}
+
+/**
+ * @brief Draw a GFX font character to the display.
+ */
+uint16_t TFT_24_ST7789::drawGFXChar(int16_t x, int16_t y, unsigned char c, uint16_t color) {
+
+    c -= (uint8_t)pgm_read_byte(&gfxFont->first);
+    GFXglyph *glyph  = &(((GFXglyph *)pgm_read_pointer(&gfxFont->glyph))[c]);
+    uint8_t  *bitmap = (uint8_t *)pgm_read_pointer(&gfxFont->bitmap);
+
+    uint16_t bo = pgm_read_word(&glyph->bitmapOffset);
+    uint8_t  w  = pgm_read_byte(&glyph->width),
+             h  = pgm_read_byte(&glyph->height),
+             xa = pgm_read_byte(&glyph->xAdvance);
+    int8_t   xo = pgm_read_byte(&glyph->xOffset),
+             yo = pgm_read_byte(&glyph->yOffset);
+    uint8_t  xx, yy, bits = 0, bit = 0;
+
+    startWrite();
+    _setWindow( x-1,y+2,x+w+xo+1, y+yo-2 );  // set character Window
+    for(yy=0; yy<h; yy++) {
+        for(xx=0; xx<w; xx++) {
+            if(!(bit++ & 7)) {
+                bits = pgm_read_byte(&bitmap[bo++]);
+            }
+            if(bits & 0x80) {
+                drawPixel(x+xo+xx, y+yo+yy, color);
+            }
+            bits <<= 1;
+        }
+    }
+    endWrite();
+    _resetWindow();
+    return (uint16_t)xa;
+}
+
+/**
+ * @brief GFX canvas 16-bit implementation (RAM buffer).
+ */
+GFXcanvas16::GFXcanvas16(uint16_t w, uint16_t h) {
+  uint32_t bytes = w * h * 2;
+  if ((buffer = (uint16_t *)malloc(bytes))) {
+    memset(buffer, 0, bytes);
+    _width = WIDTH = w;
+    _height = HEIGHT = h;
+  }
+}
+
+GFXcanvas16::~GFXcanvas16(void) {
+  if (buffer)
+    free(buffer);
+}
+
+void GFXcanvas16::drawPixel(int16_t x, int16_t y, uint16_t color) {
+  if (buffer) {
+    if ((x < 0) || (y < 0) || (x >= _width) || (y >= _height))
+      return;
+    buffer[x + y * WIDTH] = color;
+  }
+}
+
+uint16_t GFXcanvas16::getPixel(int16_t x, int16_t y) const {
+  return getRawPixel(x, y);
+}
+
+uint16_t GFXcanvas16::getRawPixel(int16_t x, int16_t y) const {
+  if ((x < 0) || (y < 0) || (x >= WIDTH) || (y >= HEIGHT))
+    return 0;
+  if (buffer) {
+    return buffer[x + y * WIDTH];
+  }
+  return 0;
+}
+
+void GFXcanvas16::fillScreen(uint16_t color) {
+  if (buffer) {
+    uint8_t hi = color >> 8, lo = color & 0xFF;
+    if (hi == lo) {
+      memset(buffer, lo, WIDTH * HEIGHT * 2);
+    } else {
+      uint32_t i, pixels = WIDTH * HEIGHT;
+      for (i = 0; i < pixels; i++)
+        buffer[i] = color;
+    }
+  }
+}
+
+void GFXcanvas16::byteSwap(void) {
+  if (buffer) {
+    uint32_t i, pixels = WIDTH * HEIGHT;
+    for (i = 0; i < pixels; i++)
+      buffer[i] = __builtin_bswap16(buffer[i]);
+  }
+}
+
+void GFXcanvas16::drawFastVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
+  if (h < 0) {
+    h *= -1;
+    y -= h - 1;
+    if (y < 0) {
+      h += y;
+      y = 0;
+    }
+  }
+  if ((x < 0) || (x >= width()) || (y >= height()) || ((y + h - 1) < 0)) {
+    return;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (y + h > height()) {
+    h = height() - y;
+  }
+  drawFastRawVLine(x, y, h, color);
+}
+
+void GFXcanvas16::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
+  if (w < 0) {
+    w *= -1;
+    x -= w - 1;
+    if (x < 0) {
+      w += x;
+      x = 0;
+    }
+  }
+  if ((y < 0) || (y >= height()) || (x >= width()) || ((x + w - 1) < 0)) {
+    return;
+  }
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (x + w >= width()) {
+    w = width() - x;
+  }
+  drawFastRawHLine(x, y, w, color);
+}
+
+void GFXcanvas16::drawFastRawVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
+  uint16_t *buffer_ptr = buffer + y * WIDTH + x;
+  for (int16_t i = 0; i < h; i++) {
+    (*buffer_ptr) = color;
+    buffer_ptr += WIDTH;
+  }
+}
+
+void GFXcanvas16::drawFastRawHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
+  uint32_t buffer_index = y * WIDTH + x;
+  for (uint32_t i = buffer_index; i < buffer_index + w; i++) {
+    buffer[i] = color;
+  }
+}
+
+void GFXcanvas16::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
+  for (int16_t i = x; i < x + w; i++) {
+    drawFastVLine(i, y, h, color);
+  }
+}
+
+#endif // DSP_MODEL==DSP_ST7789

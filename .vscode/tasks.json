@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Upload BT firmware",
+            "type": "shell",
+            "command": "pio run -e bt -t upload",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Upload WiFi firmware",
+            "type": "shell",
+            "command": "pio run -e wifi -t upload",
+            "group": "build",
+            "problemMatcher": []
+        }
+    ]
+}

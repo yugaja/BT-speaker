@@ -1,0 +1,87 @@
+/*************************************************************************************
+    ST7789 320x240 displays configuration file.
+    Copy this file to yoRadio/src/displays/conf/displayST7789conf_custom.h
+    and modify it
+    More info on https://github.com/e2002/yoradio/wiki/Widgets#widgets-description
+*************************************************************************************/
+
+#ifndef displayST7789conf_h
+#define displayST7789conf_h
+
+#define DSP_WIDTH       320
+#define DSP_HEIGHT      240
+#define TFT_FRAMEWDT    8
+#define MAX_WIDTH       DSP_WIDTH-TFT_FRAMEWDT*2
+//#define PLMITEMS        11
+//#define PLMITEMLENGHT   40
+//#define PLMITEMHEIGHT   22
+
+#if BITRATE_FULL
+  #define TITLE_FIX 44
+#else
+  #define TITLE_FIX 0
+#endif
+#define bootLogoTop     68
+
+/* SROLLS  */                            /* {{ left, top, fontsize, align }, buffsize, uppercase, width, scrolldelay, scrolldelta, scrolltime } */
+const ScrollConfig metaConf       PROGMEM = {{ TFT_FRAMEWDT, TFT_FRAMEWDT, 3, WA_CENTER }, 140, true, MAX_WIDTH, 5000, 7, 40 };
+const ScrollConfig title1Conf     PROGMEM = {{TFT_FRAMEWDT, 70, 2, WA_CENTER}, 140, true, MAX_WIDTH, 5000, 2, 40};
+const ScrollConfig title2Conf     PROGMEM = {{TFT_FRAMEWDT, 100, 2, WA_CENTER}, 140, true, MAX_WIDTH, 5000, 2, 40};
+const ScrollConfig playlistConf   PROGMEM = {{ TFT_FRAMEWDT, 112, 2, WA_LEFT }, 140, true, MAX_WIDTH, 1000, 7, 40 };
+const ScrollConfig apTitleConf    PROGMEM = {{ TFT_FRAMEWDT, TFT_FRAMEWDT, 4, WA_CENTER }, 140, false, MAX_WIDTH, 0, 7, 40 };
+const ScrollConfig apSettConf     PROGMEM = {{ TFT_FRAMEWDT, DSP_HEIGHT-TFT_FRAMEWDT-16, 2, WA_LEFT }, 140, false, MAX_WIDTH, 0, 7, 40 };
+const ScrollConfig weatherConf    PROGMEM = {{ TFT_FRAMEWDT, 96, 1, WA_CENTER }, 160, false, MAX_WIDTH, 5000, 3, 20 };
+
+/* BACKGROUNDS  */                       /* {{ left, top, fontsize, align }, width, height, outlined } */
+const FillConfig metaBGConf       PROGMEM = {{3, 45, 0, WA_CENTER}, DSP_WIDTH - 6, 1, true}; // CsÃ­k rajzolÃ¡sa a rÃ¡diÃ³adÃ³ neve alÃ¡.
+// const FillConfig   metaBGConf     PROGMEM = {{ 0, 0, 0, WA_LEFT }, DSP_WIDTH, 50, false }; // Original.
+const FillConfig metaBGConfInv    PROGMEM = {{ 0, 50, 0, WA_LEFT }, DSP_WIDTH, 2, false };
+const FillConfig volbarConf       PROGMEM = {{TFT_FRAMEWDT, DSP_HEIGHT - TFT_FRAMEWDT - 6, 0, WA_LEFT}, MAX_WIDTH, 5, true};
+//const FillConfig   volbarConf     PROGMEM = {{ TFT_FRAMEWDT, DSP_HEIGHT-TFT_FRAMEWDT-8, 0, WA_LEFT }, MAX_WIDTH, 8, true }; Original
+const FillConfig  playlBGConf     PROGMEM = {{ 0, 107, 0, WA_LEFT }, DSP_WIDTH, 36, false };
+const FillConfig  heapbarConf     PROGMEM = {{ 0, DSP_HEIGHT-2, 0, WA_LEFT }, DSP_WIDTH, 2, false };
+
+/* WIDGETS  */ /* { left, top, fontsize, align } */
+const WidgetConfig bootstrConf    PROGMEM = {0, 182, 1, WA_CENTER};
+const WidgetConfig bitrateConf    PROGMEM = {TFT_FRAMEWDT, 191, 1, WA_RIGHT};
+const WidgetConfig voltxtConf     PROGMEM = {0, DSP_HEIGHT - 26, 1, WA_CENTER}; // HangerÅ‘
+const WidgetConfig iptxtConf      PROGMEM = {TFT_FRAMEWDT, DSP_HEIGHT - 26, 1, WA_LEFT};
+const WidgetConfig rssiConf       PROGMEM = {TFT_FRAMEWDT, DSP_HEIGHT - 26, 1, WA_RIGHT};
+const WidgetConfig numConf        PROGMEM = {0, 150, 0, WA_CENTER};
+const WidgetConfig apNameConf     PROGMEM = {TFT_FRAMEWDT, 66, 2, WA_CENTER};
+const WidgetConfig apName2Conf    PROGMEM = {TFT_FRAMEWDT, 90, 2, WA_CENTER};
+const WidgetConfig apPassConf     PROGMEM = {TFT_FRAMEWDT, 130, 2, WA_CENTER};
+const WidgetConfig apPass2Conf    PROGMEM = {TFT_FRAMEWDT, 154, 2, WA_CENTER};
+const WidgetConfig clockConf      PROGMEM = {8, 170, 0, WA_RIGHT}; // {jobb oldali tÃ¡volsÃ¡g, top}
+//const WidgetConfig clockConf     PROGMEM = {30, 211, 80, WA_RIGHT};
+const WidgetConfig vuConf         PROGMEM = {35, 190, 1, WA_CENTER}; // center fektetett, "align" nincs hasznÃ¡lva
+const WidgetConfig bootWdtConf    PROGMEM = {0, 162, 1, WA_CENTER};
+const ProgressConfig bootPrgConf  PROGMEM = {90, 14, 4};
+
+//{{ left, top, fontsize, align }dimension}
+const BitrateConfig fullbitrateConf PROGMEM = {{TFT_FRAMEWDT, 120, 2, WA_LEFT}, 42 };
+// const BitrateConfig fullbitrateConf PROGMEM = {{DSP_WIDTH-TFT_FRAMEWDT-38, 59, 2, WA_LEFT}, 42 }; // Original
+
+/* BANDS { onebandwidth (width), onebandheight (height), bandsHspace (space), bandsVspace (vspace), numofbands (perheight), fadespeed (fadespeed)} */
+#ifdef BOOMBOX_STYLE
+const VUBandsConfig bandsConf PROGMEM = {200, 7, 4, 2, 20, 12}; // 29
+#else
+const VUBandsConfig bandsConf PROGMEM = {150, 4, 2, 1, 20, 6}; // sajÃ¡t  {400, 7, 3, 2, 8, 29};
+#endif
+// const VUBandsConfig bandsConf     PROGMEM = { 32, 130, 4, 2, 10, 3 }; // Original
+
+/* STRINGS  */
+const char numtxtFmt[] PROGMEM = "%d";
+const char rssiFmt[] PROGMEM = "WiFi %ddBm";
+// const char           rssiFmt[]    PROGMEM = "WiFi %d"; // Original
+const char iptxtFmt[] PROGMEM = "%s";
+const char voltxtFmt[] PROGMEM = "\023\025%d%%"; //Original "\023\025%d" MÃ³dosÃ­tÃ¡s "hanglÃ©ptÃ©k"
+const char bitrateFmt[] PROGMEM = "%d kBs";
+
+/* MOVES  */ /* { left, top, width } */
+const MoveConfig clockMove     PROGMEM = {8, 170, -1};
+const MoveConfig weatherMove   PROGMEM = {8, 96, MAX_WIDTH}; // Ha a VU ki van kapcsolva (szÃ©lesÃ­tett pozÃ­ciÃ³)
+const MoveConfig weatherMoveVU PROGMEM = {8, 96, MAX_WIDTH}; // Az idÅ‘jÃ¡rÃ¡s widget pozÃ­ciÃ³ja.
+
+
+#endif
