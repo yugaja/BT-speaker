@@ -10,29 +10,106 @@ AudioDSP::AudioDSP(i2s_port_t port)
 
 /* ================= STREAM ================= */
 
+void AudioDSP::processStream(const uint8_t* data, uint32_t len)
+{
+    const int16_t* in = (const int16_t*)data;
+    uint32_t frames = len / (sizeof(int16_t) * 2);
+    static uint32_t cnt = 0;
+    static int32_t outBuf[1024];
+    uint32_t n = (frames > 1024) ? 1024 : frames;
+
+    for(uint32_t i = 0; i < n; i++) {
+        int16_t s16[2] = {
+            in[i*2],
+            in[i*2 + 1]
+        };
+
+        computeVU(s16);
+
+        int32_t* s32 = bassEnhancer(s16, 1.5f, false);
+        for(uint8_t f = 0; f < NUM_FILTERS; f++)
+            s32 = iirProcess(f, s32, false);
+
+        outBuf[i] = applyGain(s32);
+    }
+    // --- I2S write batch ---
+    size_t written =0;
+    esp_err_t err = i2s_write((i2s_port_t)m_i2s, outBuf, n * sizeof(int32_t), &written, 100);
+    if(err != ESP_OK) {
+        log_e("ESP32 Errorcode %i", err);
+        return;
+    }
+    if(written < n * sizeof(int32_t)) {
+        log_e("DMA buffer full, can't write all samples");
+        // Ovde možeš dodati čekanje ili retry po potrebi
+    }
+
+    if ((cnt++ & 0x3FF) == 0) {
+            log_i("DSP: frames=%lu written=%u i2s=%d",
+          frames, written, m_i2s);
+    }
+}
+
 /* ================= DSP ================= */
 
+/**
+ * @brief Bass enhancement effect using low-frequency extraction and harmonic saturation.
+ *
+ * This function extracts low-frequency content, applies controlled non-linearity,
+ * and mixes it back into the original signal to enhance perceived bass.
+ *
+ * @param in        Stereo input samples (int16_t).
+ * @param intensity Bass enhancement intensity (recommended range 0.0f - 2.0f).
+ * @param clear     If true, internal filter states are reset.
+ * @return Pointer to stereo output samples (int32_t).
+ */
 int32_t* AudioDSP::bassEnhancer(int16_t in[2], float intensity, bool clear)
 {
     static int32_t out[2];
-    static float mem[2] = {};
-    static float prev[2] = {};
+    static float lp1[2] = {0.0f, 0.0f};
+    static float lp2[2] = {0.0f, 0.0f};
 
-    const float fc = 100.0f;
     const float fs = getSampleRate();
-    const float alpha = 1.0f / (1.0f + (1.0f / (2.0f * 3.14159265f * fc)) * fs);
+    const float fc = 330.0f;
 
-    if(clear) memset(mem, 0, sizeof(mem));
+    /* One-pole low-pass coefficient (TPT form) */
+    const float g = tanf(3.14159265f * fc / fs);
+    const float a = g / (1.0f + g);
 
-    for(int ch = 0; ch < 2; ch++) {
-        float x = in[ch] / 32768.0f;
-        mem[ch] = prev[ch] + alpha * (x - prev[ch]);
-        prev[ch] = mem[ch];
-        mem[ch] = tanhf(mem[ch] * intensity);
-        out[ch] = (int32_t)((x + mem[ch]) * 32768.0f);
+    if (clear) {
+        lp1[0] = lp1[1] = 0.0f;
+        lp2[0] = lp2[1] = 0.0f;
     }
+
+    for (int ch = 0; ch < 2; ch++) {
+        /* Normalize input */
+        float x = in[ch] * (1.0f / 32768.0f);
+
+        /* First low-pass */
+        lp1[ch] += a * (x - lp1[ch]);
+
+        /* Second low-pass (to isolate bass band) */
+        lp2[ch] += a * (lp1[ch] - lp2[ch]);
+
+        /* Bass component */
+        float bass = lp1[ch] - lp2[ch];
+
+        /* Harmonic enhancement */
+        bass = tanhf(bass * intensity);
+
+        /* Mix original + enhanced bass */
+        float y = x + bass;
+
+        /* Hard clip */
+        if (y > 1.0f)  y = 1.0f;
+        if (y < -1.0f) y = -1.0f;
+
+        out[ch] = (int32_t)(y * 32767.0f);
+    }
+
     return out;
 }
+
 
 int32_t* AudioDSP::iirProcess(uint8_t idx, const int32_t in[2], bool clear)
 {
@@ -299,15 +376,15 @@ void AudioDSP::IIR_calculateCoefficients(int8_t G0, int8_t G1, int8_t G2)
     if (G2>16){
         G2=16;
     }
-    ///custom filter set incl small speaker box model
+
     FilterDef defaultChain[4] = {
-        { FILTER_LOW_SHELF,  60.0f,  -10.0f, 2.5f },
-        { FILTER_PEAK_EQ,   170.0f,  (float)G0, 1.0f   },
+        { FILTER_LOW_SHELF,  60.0f,  -10.0f, 3.0f },
+        { FILTER_PEAK_EQ,   170.0f,  (float)G0, 0.707f   },
         { FILTER_PEAK_EQ,   900.0f,  (float)G1, 1.0f   },
         { FILTER_HIGH_SHELF, 4200.0f, (float)G2, 2.3f }
     };
 
-    IIR_calculateCoefficientsExt(defaultChain, 3);
+    IIR_calculateCoefficientsExt(defaultChain, 4);
 }
 
 uint32_t AudioDSP::getSampleRate(){

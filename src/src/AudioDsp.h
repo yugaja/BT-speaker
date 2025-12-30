@@ -77,7 +77,7 @@ private:
 
     /* ===== DSP BUFFERS ===== */
 
-    static constexpr uint8_t NUM_FILTERS = 3;
+    static constexpr uint8_t NUM_FILTERS = 4;
 
     struct Biquad {
         float a0, a1, a2;
@@ -88,6 +88,10 @@ private:
     float  m_filterState[NUM_FILTERS][2][2][2] = {}; // [filter][z][in/out][ch]
 
     /* ===== VU ===== */
+
+    // uint8_t  vuLeft = 0;
+    // uint8_t  vuRight = 0;
+    // uint16_t vuThreshold = 1;
 
     /* ===== VU METER STATE ===== */
 
