@@ -1,4 +1,4 @@
-# ESP32-2432S028C BT Speaker
+# JC2432W328 BT Speaker
 
 This project is a Bluetooth (BT) speaker based on the [yoradio project](https://github.com/e2002/yoradio). It uses a dual partition approach for firmware management. The BT firmware is stored in the OTA partition.
 
@@ -11,7 +11,7 @@ This project is a Bluetooth (BT) speaker based on the [yoradio project](https://
 
 ## Hardware Requirements
 
-- ESP32-2432S028C board
+- JC2432W328 board
 - Touch panel (TP) for mode switching
 - Speakers and audio components
 
